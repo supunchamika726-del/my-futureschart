@@ -1,2 +1,199 @@
-HTML
-<h1>My Live Trading Chart</h1>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Live Trading Chart</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b0e11;color:#eaecef;font-family:Arial,sans-serif}
+header{height:55px;padding:15px;background:#151a21;border-bottom:1px solid #30363d;font-weight:bold}
+main{display:flex;min-height:calc(100vh - 55px)}
+aside{width:125px;flex-shrink:0;background:#11161d;padding:10px}
+input{width:100%;padding:10px;background:#202630;color:white;border:1px solid #39434f;border-radius:5px;margin-bottom:10px}
+#coins{height:calc(100vh - 145px);overflow-y:auto}
+.coin{padding:11px 5px;border-bottom:1px solid #252b34;font-size:12px;cursor:pointer}
+.coin:active,.coin:hover{background:#27313d}
+section{flex:1;min-width:0;padding:10px}
+#info{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+#symbol{font-weight:bold;font-size:18px}
+#price{color:#00c087;font-size:17px}
+button{background:#202630;color:#ddd;border:1px solid #39434f;padding:8px 10px;border-radius:4px;margin:2px;cursor:pointer}
+button.active{background:#f0b90b;color:#111}
+#chart{width:100%;height:65vh;min-height:300px}
+#status{font-size:11px;color:#9aa4b2;margin-top:8px}
+@media(max-width:500px){
+ aside{width:100px;padding:6px}
+ section{padding:6px}
+ #chart{height:62vh}
+ button{padding:7px 6px;font-size:11px}
+}
+</style>
+</head>
+<body>
+<header>MY LIVE CHART</header>
+<main>
+<aside>
+<input id="search" placeholder="Search coin...">
+<div id="coins">Loading coins...</div>
+</aside>
+<section>
+<div id="info">
+<span id="symbol">BTCUSDT</span>
+<span id="price">Loading...</span>
+</div>
+<div id="times">
+<button data-t="1m" class="active">1m</button>
+<button data-t="5m">5m</button>
+<button data-t="15m">15m</button>
+<button data-t="30m">30m</button>
+<button data-t="1h">1H</button>
+<button data-t="4h">4H</button>
+<button data-t="1d">1D</button>
+</div>
+<div id="chart"></div>
+<div id="status">Connecting to Binance Futures...</div>
+</section>
+</main>
+
+<script>
+const chart=LightweightCharts.createChart(
+ document.getElementById('chart'),{
+  layout:{
+   background:{color:'#0b0e11'},
+   textColor:'#d1d4dc'
+  },
+  grid:{
+   vertLines:{color:'#1c222b'},
+   horzLines:{color:'#1c222b'}
+  },
+  rightPriceScale:{borderColor:'#30363d'},
+  timeScale:{borderColor:'#30363d',timeVisible:true},
+  crosshair:{mode:0}
+ }
+);
+
+const candles=chart.addCandlestickSeries({
+ upColor:'#00c087',
+ downColor:'#f6465d',
+ borderUpColor:'#00c087',
+ borderDownColor:'#f6465d',
+ wickUpColor:'#00c087',
+ wickDownColor:'#f6465d'
+});
+
+new ResizeObserver(entries=>{
+ const r=entries[0].contentRect;
+ chart.applyOptions({width:r.width});
+}).observe(document.getElementById('chart'));
+
+let symbol='BTCUSDT';
+let interval='1m';
+let socket=null;
+let coinList=[];
+
+async function loadCoins(){
+ try{
+  const r=await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo');
+  const data=await r.json();
+  coinList=data.symbols.filter(x=>
+   x.status==='TRADING' &&
+   x.contractType==='PERPETUAL' &&
+   x.quoteAsset==='USDT'
+  ).map(x=>x.symbol).sort();
+
+  showCoins();
+  loadChart();
+ }catch(e){
+  document.getElementById('status').textContent='Could not load coins. Check internet connection.';
+ }
+}
+
+function showCoins(){
+ const q=document.getElementById('search').value.toUpperCase();
+ const list=coinList.filter(x=>x.includes(q)).slice(0,150);
+ document.getElementById('coins').innerHTML=list.map(x=>
+  `<div class="coin" data-symbol="${x}">${x}</div>`
+ ).join('');
+}
+
+document.getElementById('coins').addEventListener('click',e=>{
+ const item=e.target.closest('.coin');
+ if(!item)return;
+ symbol=item.dataset.symbol;
+ loadChart();
+});
+
+document.getElementById('search').addEventListener('input',showCoins);
+
+async function loadChart(){
+ if(socket){socket.close();socket=null}
+ candles.setData([]);
+ document.getElementById('symbol').textContent=symbol;
+ document.getElementById('price').textContent='Loading...';
+ document.getElementById('status').textContent='Loading market data...';
+
+ try{
+  const url=`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=500`;
+  const r=await fetch(url);
+  if(!r.ok)throw new Error('Market data unavailable');
+  const data=await r.json();
+  candles.setData(data.map(k=>({
+   time:k[0]/1000,
+   open:Number(k[1]),
+   high:Number(k[2]),
+   low:Number(k[3]),
+   close:Number(k[4])
+  })));
+  chart.timeScale().fitContent();
+  document.getElementById('price').textContent=
+   Number(data[data.length-1][4]).toLocaleString();
+  document.getElementById('status').textContent='Live Binance Futures Market';
+  connectSocket();
+ }catch(e){
+  document.getElementById('status').textContent='Unable to load chart: '+e.message;
+ }
+}
+
+function connectSocket(){
+ if(socket)socket.close();
+ const stream=`${symbol.toLowerCase()}@kline_${interval}`;
+ socket=new WebSocket(`wss://fstream.binance.com/ws/${stream}`);
+
+ socket.onmessage=e=>{
+  const d=JSON.parse(e.data);
+  const k=d.k;
+  const candle={
+   time:k.t/1000,
+   open:Number(k.o),
+   high:Number(k.h),
+   low:Number(k.l),
+   close:Number(k.c)
+  };
+  candles.update(candle);
+  document.getElementById('price').textContent=
+   candle.close.toLocaleString();
+ };
+ socket.onclose=()=>{
+  document.getElementById('status').textContent='Connection closed. Reconnect by selecting a coin or timeframe.';
+ };
+ socket.onerror=()=>{
+  document.getElementById('status').textContent='Live connection error.';
+ };
+}
+
+document.getElementById('times').addEventListener('click',e=>{
+ const b=e.target.closest('button[data-t]');
+ if(!b)return;
+ interval=b.dataset.t;
+ document.querySelectorAll('#times button').forEach(x=>x.classList.remove('active'));
+ b.classList.add('active');
+ loadChart();
+});
+
+loadCoins();
+</script>
+</body>
+</html>
